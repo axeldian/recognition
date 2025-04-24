@@ -15,13 +15,9 @@ setup(
         "numpy<2.0.0",
         "scipy",
         "rdkit",
-        "os",
-        "pickle",
         "networkx",
         "matplotlib",
-        "itertools",
-        "collections",
-        "numba"
+        "numba<0.60.0"
     ],
 )
 
