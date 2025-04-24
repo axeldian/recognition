@@ -10,9 +10,18 @@ setup(
         ],
     },
     install_requires=[
-        "MDAnalysis",
+        "MDAnalysis<2.6.0",
         "pandas",
-        "numpy",
+        "numpy<2.0.0",
+        "scipy",
+        "rdkit",
+        "os",
+        "pickle",
+        "networkx",
+        "matplotlib",
+        "itertools",
+        "collections",
+        "numba"
     ],
 )
 
