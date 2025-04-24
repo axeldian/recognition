@@ -10,9 +10,10 @@ setup(
         ],
     },
     install_requires=[
-        "MDAnalysis<2.6.0",
-        "pandas",
         "numpy<2.0.0",
+        "MDAnalysis<2.6.0",
+        "gsd<1.9.3",
+        "pandas",
         "scipy",
         "rdkit",
         "networkx",
