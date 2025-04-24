@@ -12,6 +12,7 @@ setup(
     install_requires=[
         "numpy<2.0.0",
         "MDAnalysis==2.4.3",
+        "gsd==1.9.2",
         "pandas",
         "scipy",
         "rdkit",
