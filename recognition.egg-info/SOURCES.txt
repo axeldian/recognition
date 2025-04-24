@@ -1,0 +1,12 @@
+setup.py
+recognition/FastAtomsClasses.py
+recognition/TrajectoryAnalysis.py
+recognition/__init__.py
+recognition/__main__.py
+recognition/cli.py
+recognition.egg-info/PKG-INFO
+recognition.egg-info/SOURCES.txt
+recognition.egg-info/dependency_links.txt
+recognition.egg-info/entry_points.txt
+recognition.egg-info/requires.txt
+recognition.egg-info/top_level.txt

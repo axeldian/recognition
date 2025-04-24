@@ -1,0 +1,2 @@
+[console_scripts]
+recognition = recognition.cli:parse_and_execute

@@ -1,0 +1,6 @@
+Metadata-Version: 2.1
+Name: recognition
+Version: 1.0.0
+Requires-Dist: MDAnalysis
+Requires-Dist: pandas
+Requires-Dist: numpy
