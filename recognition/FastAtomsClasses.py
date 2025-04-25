@@ -758,6 +758,7 @@ def graph_to_rdkit(graph, labels):
         # Retrieve atom symbol (e.g. 'C', 'O', 'N') for this node
         atom_symbol = labels[node]
         atom = Chem.Atom(atom_symbol)
+        atom.SetNoImplicit(True)
         idx = rw_mol.AddAtom(atom)
         node_to_idx[node] = idx
 
