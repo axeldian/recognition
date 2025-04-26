@@ -6,15 +6,19 @@ from numba import njit
 from scipy.spatial import cKDTree
 from itertools import combinations_with_replacement
 from collections import Counter
-#from time import time
+from rdkit import Chem
 
 class Hydrogen():
+    """
+    A class for Hydrogen atoms.
+    """
     
     def __init__(self, position, index, isCoordinated=None, neighAtomType = None, neighAtomIndx = None, neighAtomDist = None, neighAtomVect=None):
         self.position = position
         self.index = index
         self.type_='H'
         self.molecule=None
+        self.moleculeFormula = None
         if isCoordinated is None:
             self.isCoordinated = False
         else:
@@ -53,48 +57,15 @@ class Hydrogen():
         self.neighAtomDist[1] = distance
         self.neighAtomVect[1] = vector
 
-    def make_first_neighbor_second(self):
-        first_type, first_indx = self.neighAtomType[0], self.neighAtomIndx[0] 
-        first_dist, first_vect = self.neighAtomDist[0], self.neighAtomVect[0].copy()
-        self.neighAtomType[1] = first_type
-        self.neighAtomIndx[1] = first_indx
-        self.neighAtomDist[1] = first_dist
-        self.neighAtomVect[1] = first_vect
-
-    def remove_neighbor(self, whichNeighbor):
-        if whichNeighbor=='first':
-            k=0
-            self.isCoordinated = False
-        elif whichNeighbor=='second':
-            k=1
-        self.neighAtomType[k] = None
-        self.neighAtomIndx[k] = None
-        self.neighAtomDist[k] = float('inf')
-        self.neighAtomVect[k] = None
-
-    def make_second_neighbor_first(self):
-        second_type, second_indx = self.neighAtomType[1], self.neighAtomIndx[1] 
-        second_dist, second_vect = self.neighAtomDist[1], self.neighAtomVect[1].copy()
-        self.neighAtomType[0] = second_type
-        self.neighAtomIndx[0] = second_indx
-        self.neighAtomDist[0] = second_dist
-        self.neighAtomVect[0] = second_vect
-        self.coordinate()        
-
-    def is_closer_than_current_second_neighbor(self, distance):
-        return distance < self.neighAtomDist[1]
-
-    def is_closer_than_current_first_neighbor(self, distance):
-        return distance < self.neighAtomDist[0]
-
 class HeavyAtom():
-
-    cutoffs = {'C': {'C' : 1.95, 'O' : 1.82}, 'O': {'C':1.82, 'O':1.52 } }
- 
+    """
+    A class for all atoms that are not hydrogens.
+    """ 
     def __init__(self, position, type_, index, neighAtomType = None, neighAtomIndx = None, neighAtomDist = None, molecule=None):
         self.position = position
         self.type_ = type_
         self.index = index
+        self.moleculeFormula = None
         
         if neighAtomType is None:
             self.neighAtomType = []
@@ -117,13 +88,6 @@ class HeavyAtom():
         self.neighAtomType.append(type_)
         self.neighAtomIndx.append(index)
         self.neighAtomDist.append(distance)
-        
-    def remove_neighbor(self, index):
-        index_to_remove = self.neighAtomIndx.index(index)   # .index is a python method giving the index in the neighAtomIndx list of value "index"
-        type_ = self.neighAtomType[index_to_remove]
-        del self.neighAtomType[index_to_remove]
-        del self.neighAtomIndx[index_to_remove]
-        del self.neighAtomDist[index_to_remove]
 
 class Frame():
     def __init__(self, filename=None, box_size=None, types_list = None, N_atom=0, 
@@ -221,10 +185,10 @@ class Frame():
         self.N_atom = len(self.positions)
         self.positions = np.array(self.positions)
         self.labels = np.array(self.labels)
-        self.types_list = np.unique(self.labels)
+        self.types_list = np.sort(np.unique(self.labels))
         self.heavy_types = np.array([typ for typ in self.types_list if typ != 'H'])
         
-        if not len(np.where( (self.positions<0) | (self.positions>self.box_size) )[0]) == 0:
+        if not len(np.where( (self.positions<0) | (self.positions>=self.box_size) )[0]) == 0:
             # wrap positions if they need to be wrapped
             self.positions = wrap(self.positions, self.box_size)
 
@@ -249,52 +213,49 @@ class Frame():
         self.N_H = len(self.hydrogenList)
         self.N_Heavy = len(self.heavyList)
 
-                
-    def find_H2(self):
-        """ Identify H2 molecules """
-        lonely_hydrogens = []
-        for H in self.hydrogenList:
-            if not H.isCoordinated:
-                lonely_hydrogens.append(H)
-        for k1 in range(len(lonely_hydrogens)-1):
-            for k2 in range (k1+1,len(lonely_hydrogens)):
-                H1, H2 = lonely_hydrogens[k1], lonely_hydrogens[k2]
-                vector = correct_vector(H1.position - H2.position, self.box_size)
-                distance = np.sqrt(vector@vector)               
-                if distance < self.H_cutoffs['H']:
-                    if H1.is_closer_than_current_first_neighbor(distance) and H2.is_closer_than_current_first_neighbor(distance):
-                        if H1.isCoordinated:
-                            self.allAtomsList[ H1.neighAtomIndx[0] ].remove_neighbor('first')
-                        if H2.isCoordinated:
-                            self.allAtomsList[ H2.neighAtomIndx[0] ].remove_neighbor('first')
-                        H1.attribute_first_neighbor('H', H2.index, distance, vector)
-                        H2.attribute_first_neighbor('H', H1.index, distance, vector)
-                        
+    def hydrogenNeighborAnalysis_with_KDTree(self):
+        """
+        Perform neighbor search with type_-specific cutoffs for hydrogen-heavy atom interactions.
+        
+        Args:
+            hydrogen_positions (ndarray): Positions of hydrogen atoms (N_H x 3).
+            heavy_positions (ndarray): Positions of heavy atoms (N_Heavy x 3).
+            heavy_types (ndarray): Types of heavy atoms (N_Heavy,).
+            box_size (float): Size of the periodic simulation box.
+            H_cutoffs (dict): Dictionary of type_-specific cutoff distances.
+    
+        Returns:
+            neighbors (list of list): Each hydrogen's neighbors, filtered by type_-specific cutoffs.
+        """
+        heavy_indices = self.labels != 'H'
+        h_positions = self.positions[~heavy_indices]
+        #heavy_positions = self.positions[self.labels!='H']
+        # Get the unique types of heavy atoms
+        heavy_labels = self.labels[ heavy_indices ]
+        
+        distances_to_neighbors = np.empty((len(self.heavy_types), self.N_H))
+        neighbors_indexes = np.empty((len(self.heavy_types), self.N_H))
+        #type_indexes = []
+        # Build KDTree for each heavy atom type_
+        for i, atom_type in enumerate(self.heavy_types):
+            # Select positions corresponding to the current type_
+            type_indexes = np.append( np.arange(self.N_atom)[self.labels==atom_type] , self.N_atom )
+            type_positions = self.positions[self.labels == atom_type]
+            self.heavyTrees[atom_type] = cKDTree(type_positions, boxsize=self.box_size)
+            distances_to_neighbors[i], neighbors_indexes[i] = self.heavyTrees[atom_type].query(h_positions,k=1,distance_upper_bound=self.H_cutoffs[atom_type]
+                                                                                              )
+            neighbors_indexes[i] = type_indexes[neighbors_indexes[i].astype(int)]
 
-    def find_H2_optimized(self):
-        lonely_hydrogen_pos = np.array([H.position for H in self.hydrogenList if not H.isCoordinated])
-    
-        # Compute pairwise distances
-        diff = lonely_hydrogen_pos[:, None, :] - lonely_hydrogen_pos[None, :, :]
-        diff = np.apply_along_axis(correct_vector, -1, diff, self.box_size)
-        distances = np.linalg.norm(diff, axis=-1)
-    
-        # Apply cutoff
-        mask = (distances < self.H_cutoffs['H']) & (distances > 0)
-        pairs = np.argwhere(mask)
-    
-        # Assign neighbors based on distances
-        for i, j in pairs:
-            H1, H2 = self.hydrogenList[i], self.hydrogenList[j]
-            distance = distances[i, j]
-            if H1.is_closer_than_current_first_neighbor(distance) and H2.is_closer_than_current_first_neighbor(distance):
-                if H1.isCoordinated:
-                    self.allAtomsList[H1.neighAtomIndx[0]].remove_neighbor('first')
-                if H2.isCoordinated:
-                    self.allAtomsList[H2.neighAtomIndx[0]].remove_neighbor('first')
-                H1.attribute_first_neighbor('H', H2.index, distance, diff[i, j])
-                H2.attribute_first_neighbor('H', H1.index, distance, -diff[i, j])
+        first_neighbor_index = neighbors_indexes[np.argmin(distances_to_neighbors, axis=0), np.arange(neighbors_indexes.shape[1])]
+        first_neighbor_distance = np.min(distances_to_neighbors, axis=0)
 
+        for k in range(self.N_H):
+            if first_neighbor_index[k] < self.N_atom:
+                neighbor = self.allAtomsList[first_neighbor_index[k].astype(int)] 
+                H = self.hydrogenList[k]
+                H.attribute_first_neighbor(neighbor.type_, neighbor.index, first_neighbor_distance[k], correct_vector(neighbor.position - H.position, self.box_size))
+            # BEWARE for cKDTree, atomic cordinates should all be wrapped in [0,boxsize[
+    
     def find_H2_with_KDTree(self):
         """ 
         To apply : after hydrogenNeighborAnalysis, once most hydrogens have been coordinate
@@ -338,19 +299,6 @@ class Frame():
             # instead of indexes in lonely_hydrogen_pos.
             potential_H2_pairs_indexes = lonely_hydrogen_indexes[potential_H2_pairs_indexes]
 
-            """ THE COMMENTED CODE BELOW IS USELESS :
-            since all hydrogens H whose indexes are listed potential_H2_pairs_indexes are originally
-            from lonely_hydrogen_indexes, by construction they have no first neighbors and 
-            H.neighAtomDist[0] = np.inf : the boolean_array_H2_closer_than_current_neighbor consists
-            entirely of True and no filtering is effectively performed (as it is not necessary).
-            
-            current_neighbors_distances = np.array([[Ha.neighAtomDist[0], Hb.neighAtomDist[0]] for Ha, Hb in np.asarray(self.allAtomsList)[potential_H2_pairs_indexes]])
-            boolean_array_H2_closer_than_current_neighbor = (distances < current_neighbors_distances[:,0]) * (distances < current_neighbors_distances[:,1])
-            
-            potential_H2_pairs_indexes = potential_H2_pairs_indexes[boolean_array_H2_closer_than_current_neighbor]
-            diff = diff[boolean_array_H2_closer_than_current_neighbor]
-            distances = distances[boolean_array_H2_closer_than_current_neighbor]"""
-    
             # Prevent Hn (n>=3) chains strictly forbidding an H to appear in two different pairs
             # (if an H appears in two different potential_pairs, only the one with smallest H-H
             # distance is kept in actual_pairs)
@@ -366,24 +314,6 @@ class Frame():
         else:
             return [] # if there are no H2, we return an empty list.
     
-                
-
-    def attribute_remaining_H(self, FreeEnergyComp=False):
-        """ After a preliminary hydrogen neighbor analysis that allowed to build H neighbor lists
-            and H2 identification, all non-coordinated H's are unambiguously attributed to their 2d neighbors.
-        """
-        for H in self.hydrogenList:
-            if not H.isCoordinated:
-                H.make_second_neighbor_first()
-                self.allAtomsList[H.neighAtomIndx[0]].add_neighbor('H', H.index, H.neighAtomDist[0])
-                H.remove_neighbor('second')
-            if FreeEnergyComp:
-                for X in self.heavyList:
-                    vector = correct_vector(X.position - H.position, self.box_size)
-                    distance = np.sqrt(vector@vector)
-                    if H.is_closer_than_current_second_neighbor(distance):
-                        H.attribute_second_neighbor(X.type_, X.index, distance, vector)
-
     def attribute_remaining_hydrogens_KDTree(self, H_in_H2_indexes):
         """
         To apply : Once H2 molecules have been identified (follows find_H2)
@@ -404,50 +334,43 @@ class Frame():
            of a second neighbor (actually this might be overkill for very little perf gain)
         """
         lonely_hydrogen_pos, lonely_hydrogen_indexes = [] , []
-        coordinated_hydrogen_indexes, coordinated_hydrogen_pos = [], []
-
         for H in self.hydrogenList:
-            if H.isCoordinated:
-                coordinated_hydrogen_indexes.append(H.index)
-                coordinated_hydrogen_pos.append(H.position)
-            else:
+            if not H.isCoordinated:
                 lonely_hydrogen_indexes.append(H.index)
                 lonely_hydrogen_pos.append(H.position)
         
         lonely_hydrogen_pos = np.array(lonely_hydrogen_pos)
         lonely_hydrogen_indexes = np.array(lonely_hydrogen_indexes)
-        coordinated_hydrogen_pos = np.array(coordinated_hydrogen_pos)
-        coordinated_hydrogen_indexes = np.array(coordinated_hydrogen_indexes)
+        hydrogen_pos = np.asarray([H.position for H in self.hydrogenList])
 
         heavy_indices = self.labels!='H'
-        heavy_indices[H_in_H2_indexes] = True
         heavy_pos = self.positions[heavy_indices]
         heavy_indexes = np.nonzero(heavy_indices)[0]
-
         heavy_tree = cKDTree(heavy_pos, boxsize=self.box_size)
 
         if len(lonely_hydrogen_pos) != 0:
-            lonely_distances_to_neighbors, lonely_neighbors_indexes = heavy_tree.query(lonely_hydrogen_pos, k=2)
+            lonely_distances_to_neighbors, lonely_neighbors_indexes = heavy_tree.query(lonely_hydrogen_pos, k=[1])
             lonely_neighbors_indexes = heavy_indexes[lonely_neighbors_indexes.astype(int)]
-            # queried arrays have size (len(x=lonely_hydrogen_pos), k=2).
+            # queried arrays have size (len(x=lonely_hydrogen_pos), k=1).
     
             for i, neighbor_index in enumerate(lonely_neighbors_indexes):
-                neighbor_1 = self.allAtomsList[neighbor_index[0]]#.astype(int)]
-                neighbor_2 = self.allAtomsList[neighbor_index[1]]#.astype(int)]
+                neighbor_1 = self.allAtomsList[neighbor_index[0]]
                 H = self.allAtomsList[lonely_hydrogen_indexes[i]]
-                H.attribute_first_neighbor(neighbor_1.type_, neighbor_1.index, lonely_distances_to_neighbors[i][0], 
-                                           correct_vector(neighbor_1.position - H.position, self.box_size))
-                H.attribute_second_neighbor(neighbor_2.type_, neighbor_2.index, lonely_distances_to_neighbors[i][1], 
-                                            correct_vector(neighbor_2.position - H.position, self.box_size))
+                H.attribute_first_neighbor(neighbor_1.type_, neighbor_1.index, lonely_distances_to_neighbors[i][0], correct_vector(neighbor_1.position - H.position, self.box_size))
 
-        coordinated_distances_to_neighbors, coordinated_neighbors_indexes = heavy_tree.query(coordinated_hydrogen_pos, k=[2])
-        coordinated_neighbors_indexes = heavy_indexes[coordinated_neighbors_indexes.astype(int)]
+        if len(H_in_H2_indexes) > 0:
+            heavy_indices[H_in_H2_indexes] = True
+            heavy_pos = self.positions[heavy_indices]
+            heavy_indexes = np.nonzero(heavy_indices)[0]
+            heavy_tree = cKDTree(heavy_pos, boxsize=self.box_size)
+
+        h_distances_to_neighbors, h_neighbors_indexes = heavy_tree.query(hydrogen_pos, k=[2])
+        h_neighbors_indexes = heavy_indexes[h_neighbors_indexes.astype(int)]
         
-        for i, neighbor_index in enumerate(coordinated_neighbors_indexes):
+        for i, neighbor_index in enumerate(h_neighbors_indexes):
             second_neighbor = self.allAtomsList[neighbor_index[0]]
-            H = self.allAtomsList[coordinated_hydrogen_indexes[i]]
-            H.attribute_second_neighbor(second_neighbor.type_, second_neighbor.index, coordinated_distances_to_neighbors[i][0], 
-                                        correct_vector(second_neighbor.position - H.position, self.box_size))
+            H = self.hydrogenList[i]
+            H.attribute_second_neighbor(second_neighbor.type_, second_neighbor.index, h_distances_to_neighbors[i][0], correct_vector(second_neighbor.position - H.position, self.box_size))
 
     def coordinate_heavies_to_hydrogens(self):
         """ 
@@ -460,80 +383,6 @@ class Frame():
                 neighbor_of_H = self.allAtomsList[H.neighAtomIndx[0]]
                 neighbor_of_H.add_neighbor('H', H.index, H.neighAtomDist[0])
 
-
-            
-    def hydrogenNeighborAnalysis(self):
-        """ plain and easy but likely too slow """
-        for i in range(self.N_H):
-            for j in range(self.N_Heavy):
-                H = self.hydrogenList[i]
-                X = self.heavyList[j]
-                vector = correct_vector(X.position - H.position, self.box_size)
-                distance = np.sqrt(vector@vector)
-                if distance < self.H_cutoffs[X.type_]:
-                    if not H.isCoordinated:
-                        H.attribute_first_neighbor(X.type_, X.index, distance, vector)
-                        X.add_neighbor('H', H.index, distance)
-                    else:
-                        if H.is_closer_than_current_first_neighbor(distance):   # check if current heavy is closer than first neighbor
-                            self.allAtomsList[H.neighAtomIndx[0]].remove_neighbor(H.index)  # remove H from heavy atom neighbors list
-                            H.make_first_neighbor_second()
-                            H.attribute_first_neighbor(X.type_, X.index, distance, vector)
-                            X.add_neighbor('H', H.index, distance)
-                        elif H.is_closer_than_current_second_neighbor(distance):
-                            H.attribute_second_neighbor(X.type_, X.index, distance, vector)
-                elif H.is_closer_than_current_second_neighbor(distance):
-                    H.attribute_second_neighbor(X.type_, X.index, distance, vector)
-        self.find_H2()
-        self.attribute_remaining_H()
-
-    
-    def hydrogenNeighborAnalysis_with_KDTree(self):
-        """
-        Perform neighbor search with type_-specific cutoffs for hydrogen-heavy atom interactions.
-        
-        Args:
-            hydrogen_positions (ndarray): Positions of hydrogen atoms (N_H x 3).
-            heavy_positions (ndarray): Positions of heavy atoms (N_Heavy x 3).
-            heavy_types (ndarray): Types of heavy atoms (N_Heavy,).
-            box_size (float): Size of the periodic simulation box.
-            H_cutoffs (dict): Dictionary of type_-specific cutoff distances.
-    
-        Returns:
-            neighbors (list of list): Each hydrogen's neighbors, filtered by type_-specific cutoffs.
-        """
-        heavy_indices = self.labels != 'H'
-        h_positions = self.positions[~heavy_indices]
-        #heavy_positions = self.positions[self.labels!='H']
-        # Get the unique types of heavy atoms
-        heavy_labels = self.labels[ heavy_indices ]
-        
-        distances_to_neighbors = np.empty((len(self.heavy_types), self.N_H))
-        neighbors_indexes = np.empty((len(self.heavy_types), self.N_H))
-        #type_indexes = []
-        # Build KDTree for each heavy atom type_
-        for i, atom_type in enumerate(self.heavy_types):
-            # Select positions corresponding to the current type_
-            type_indexes = np.append( np.arange(self.N_atom)[self.labels==atom_type] , self.N_atom )
-            type_positions = self.positions[self.labels == atom_type]
-            self.heavyTrees[atom_type] = cKDTree(type_positions, boxsize=self.box_size)
-            distances_to_neighbors[i], neighbors_indexes[i] = self.heavyTrees[atom_type].query(h_positions,k=1,distance_upper_bound=self.H_cutoffs[atom_type]
-                                                                                              )
-            neighbors_indexes[i] = type_indexes[neighbors_indexes[i].astype(int)]
-
-        first_neighbor_index = neighbors_indexes[np.argmin(distances_to_neighbors, axis=0), np.arange(neighbors_indexes.shape[1])]
-        first_neighbor_distance = np.min(distances_to_neighbors, axis=0)
-
-        for k in range(self.N_H):
-            if first_neighbor_index[k] < self.N_atom:
-                neighbor = self.allAtomsList[first_neighbor_index[k].astype(int)] 
-                H = self.hydrogenList[k]
-                H.attribute_first_neighbor(neighbor.type_, neighbor.index, first_neighbor_distance[k], correct_vector(neighbor.position - H.position, self.box_size))
-        
-            # BEWARE for cKDTree, atomic cordinates should all be 0 <= x <= boxsize !
-            # (which means the current format -boxsize/2 <= x <= boxsize/2 is not adapted
-            # (simply shifting all coordinates by boxsize/2 should do the trick.
-    
 
     def heavyAtomsNeighborAnalysis_KDTree(self):
         """
@@ -570,21 +419,6 @@ class Frame():
                     X1.add_neighbor(type2, ind2, dist)
                     X2.add_neighbor(type1, ind1, dist)
                 
-    
-    # No limit on heavy atom binding
-    def heavyAtomsNeighborAnalysis(self):
-        for i in range(self.N_Heavy-1):
-            for j in range(i+1,self.N_Heavy):
-                X = self.heavyList[i]
-                Y = self.heavyList[j]
-                vector = X.position - Y.position
-                vector = correct_vector(vector, self.box_size)
-                distance = np.sqrt(vector@vector)
-                if distance < X.cutoffs[X.type_][Y.type_]:
-                        X.add_neighbor(Y.type_, Y.index, distance)
-                        Y.add_neighbor(X.type_, X.index, distance)
-
-
     def build_molecule(self, start_index, seen=None,molecule=None):
         if seen is None:
             seen=set()
@@ -616,16 +450,22 @@ class Frame():
         for X in self.allAtomsList:
             if X.molecule is None:
                 molecule = self.build_molecule(X.index)
+                molecule_form = molecule_formula(molecule, self.labels, self.types_list)
                 for index in molecule.nodes:
                     self.allAtomsList[index].molecule = molecule
-
-    def molecule_formula(self, molecule):
-        formula = {}
-        for type_ in self.types_list:
-            formula[type_] = 0
-        for index in molecule.nodes:
-            formula[self.labels[index]] += 1
-        return formula
+                    self.allAtomsList[index].moleculeFormula = molecule_form
+        
+    def analyze(self):
+        if not self.analyzed:
+            self.initialize_labels_and_positions()
+            self.initialize_objects_lists()
+            self.hydrogenNeighborAnalysis_with_KDTree()
+            H_in_H2_indexes = self.find_H2_with_KDTree()
+            self.attribute_remaining_hydrogens_KDTree(H_in_H2_indexes)
+            self.coordinate_heavies_to_hydrogens()
+            self.heavyAtomsNeighborAnalysis_KDTree()
+            self.assign_molecules_to_atoms()
+        self.analyzed=True    
     
     def molecule_histogram(self):
         seen = set()
@@ -633,17 +473,26 @@ class Frame():
         for X in self.allAtomsList:
             if X.molecule not in seen:
                 seen.add(X.molecule)
-                formula = fast_molecule_formula(X.molecule, self.labels, self.types_list)
+                formula = molecule_formula(X.molecule, self.labels, self.types_list)
                 if formula not in hist.keys():
                     hist[formula] = 1
                 else:
                     hist[formula] += 1
         return hist
 
+    def get_molecule_list(self):
+        """
+        Returns list of each atom's molecular networkx graph.
+        """
+        return [X.molecule for X in self.allAtomsList]
+
+    def get_molecule_formulas(self):
+        """
+        Returns list of each atom's molecular formula (str).
+        """
+        return np.asarray([molecule_formula(mol, self.labels, self.types_list) for mol in self.get_molecule_list()])
     
     def build_hydrogen_identification_array(self):
-        # Cache molecule formulas
-        molecule_formulas = {mol: fast_molecule_formula(mol, self.labels, self.types_list) for mol in {Atom.molecule for Atom in self.allAtomsList}}
         
         # Preallocate lists
         dict_ = {'index': [], 'mol1': [], 'mol2': [], 'atom1_type': [], 'atom1_index': [],
@@ -652,8 +501,8 @@ class Frame():
         # Iterate through hydrogens
         for H in self.hydrogenList:
             i1, i2 = H.neighAtomIndx
-            mol1 = molecule_formulas[H.molecule]
-            mol2 = molecule_formulas[self.allAtomsList[i2].molecule]
+            mol1 = H.moleculeFormula
+            mol2 = self.allAtomsList[i2].moleculeFormula
     
             # Cache neighbor attributes
             v1, v2 = H.neighAtomVect
@@ -672,18 +521,6 @@ class Frame():
             dict_['cos(angle)'].append(np.dot(v1, v2) / (d1 * d2))
         
         return dict_ 
-        
-    def analyze(self):
-        if not self.analyzed:
-            self.initialize_labels_and_positions()
-            self.initialize_objects_lists()
-            self.hydrogenNeighborAnalysis_with_KDTree()
-            H_in_H2_indexes = self.find_H2_with_KDTree()
-            self.attribute_remaining_hydrogens_KDTree(H_in_H2_indexes)
-            self.coordinate_heavies_to_hydrogens()
-            self.heavyAtomsNeighborAnalysis_KDTree()
-            self.assign_molecules_to_atoms()
-        self.analyzed=True
 
 @njit
 def correct_vector(vector, box_size):
@@ -698,7 +535,24 @@ def correct_vector(vector, box_size):
 
 def wrap(positions, box_size):    # supposes the center of the CUBIC box is at (0.5) 
     return positions % box_size
-    
+
+def forbid_H_n_chains(pairs, distances, vectors):    # tested : it works.
+    sorted_indices = np.argsort(distances)
+    sorted_pairs = pairs[sorted_indices]
+
+    used_indices = set()
+    filtered_pairs = []
+    unique_mask = []
+
+    for i, pair in enumerate(sorted_pairs):
+        if pair[0] not in used_indices and pair[1] not in used_indices:
+            filtered_pairs.append(pair)
+            unique_mask.append(True)
+            used_indices.update(pair)
+        else:
+            unique_mask.append(False)
+
+    return np.asarray(filtered_pairs), distances[sorted_indices][unique_mask], vectors[sorted_indices][unique_mask]
 
 def formula_dict_to_string(dict_):   # returns the usual molecular formula as a string from a dictionary input
     string = ''                     # ex : {'C':3, 'O':0, 'H':9, 'N':1} --> 'C3H9N'
@@ -709,28 +563,30 @@ def formula_dict_to_string(dict_):   # returns the usual molecular formula as a 
                 string += f'{dict_[type_]}' 
     return string
 
-def fast_molecule_formula(graph, labels, types_list):
+def molecule_formula(graph, labels, types_list=None):
     """
     Builds the molecular formula string directly from a networkx graph.
     
     Args:
         graph (nx.Graph): The molecular graph.
         labels (list): A list of atom labels indexed by graph nodes.
-        types_list (list): A list of all possible atom types (e.g., ['H', 'C', 'O', 'N']).
+        types_list (list): A list of all possible atom types (e.g., ['H', 'C', 'O', 'N']). Order sets formula order.
         
     Returns:
         str: Molecular formula as a string.
     """
     # Count atom types directly from node labels
     atom_counts = Counter(labels[index] for index in graph.nodes)
-    
+
+    # If order is not specified, default is alphabetic.
+    if types_list is None:
+        types_list = np.sort(np.unique(labels))
+        
     # Build the formula string in the order of `types_list`
     return ''.join(
         f"{type_}{atom_counts[type_] if atom_counts[type_] > 1 else ''}" 
-        for type_ in np.sort(types_list) if atom_counts.get(type_, 0) > 0
+        for type_ in types_list if atom_counts.get(type_, 0) > 0
     )
-
-from rdkit import Chem
 
 def graph_to_rdkit(graph, labels):
     """
@@ -771,22 +627,4 @@ def graph_to_rdkit(graph, labels):
 
     # 4) Freeze to an immutable Mol and return
     return rw_mol.GetMol()
-
-#@njit
-def forbid_H_n_chains(pairs, distances, vectors):    # tested : it works.
-    sorted_indices = np.argsort(distances)
-    sorted_pairs = pairs[sorted_indices]
-
-    used_indices = set()
-    filtered_pairs = []
-    unique_mask = []
-
-    for i, pair in enumerate(sorted_pairs):
-        if pair[0] not in used_indices and pair[1] not in used_indices:
-            filtered_pairs.append(pair)
-            unique_mask.append(True)
-            used_indices.update(pair)
-        else:
-            unique_mask.append(False)
-
-    return np.asarray(filtered_pairs), distances[sorted_indices][unique_mask], vectors[sorted_indices][unique_mask]
+    
