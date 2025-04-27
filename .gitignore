@@ -1,0 +1,4 @@
+recognition/__pycache__
+recognition.egg-info
+tutorials/.ipynb_checkpoints
+tutorials/*csv
