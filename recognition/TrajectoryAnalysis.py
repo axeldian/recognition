@@ -4,59 +4,112 @@ import numpy as np
 import os
 import pickle
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+from dataclasses import dataclass
+from typing import List, Optional, Union, Sequence
+from pathlib import Path
 from .FastAtomsClasses import Frame
 
-def trajectory_analysis(traj_file_path, do_hydrogen_analysis=True, save=False, step_min=0, Nstep=1, stepsList=None, analyze_whole_trajectory=True, do_molecular_analysis=True, **kwargs):
+@dataclass
+class TrajectoryAnalysisResult:
+    """
+    A container for the results of the analysis (frames_list, h dfs list, mol histogram).
+    Access a component by calling corresponding attribute (e.g., TrajectoryAnalysisResult.frames is the frames list).
+    """
+    frames: List[Frame]
+    hydrogen_dfs: List[pd.DataFrame]
+    time_histogram: Optional[pd.DataFrame] = None
+
+def trajectory_analysis(
+    traj_file_path: str,
+    step_min: int = 0,
+    step_max: Optional[int] = None,
+    stride: int = 1,
+    steps_list: Optional[Union[slice, Sequence[int], np.ndarray]] = None,
+    do_molecular_analysis: bool = True,
+    do_hydrogen_analysis: bool = True,
+    save: bool = False,
+    **kwargs
+) -> TrajectoryAnalysisResult:
     """
     Analyzes every frame of the provided trajectory file.
-    Builds (and optionally saves) a list of analyzed Frame objects.
 
     Args :
         traj_file_path (string) : path of the trajectory file.
 
     Kwargs :
+        step_min (int) : initial step (default: 0)
+        step_max (int) : final step (default: 1)
+        stride (int) : step between every analyzed Frame.
+        steps_list (array-like) : integer or boolean array specifying the list of frames to analyze.
+        do_molecular_analysis (bool) : if True, builds and saves the molecular population histogram over the analyzed trajectory as a CSV.
         do_hydrogen_analysis (bool) : if True, builds a list of hydrogen identification dataframes.
-        save (bool) : if True, saves both the list of Frame objects and pandas dfs.
+        save (bool) : if True, saves pandas hydrogen_analysis list of dfs.
+
+
+    Returns:
+        TrajectoryAnalysisResult : a container for the Frame list, the H DFs list and the molecule histogram DF.
     """
-    if stepsList is None:
-        stepsList = np.arange(step_min, step_min+Nstep)
-    u = MDAnalysis.Universe(traj_file_path)
-    if analyze_whole_trajectory:
-        stepsList = slice(None)
-    h_identification_DFs_list = []
-    frames_list = []
+    if steps_list is None: 
+    # initialize the list of steps to analyze
+        steps_list = slice(step_min, step_max, stride)
+        steps_list_to_print = []
+    elif isinstance(steps_list, (list, np.ndarray)):    
+    # initialize list of steps to be printed in the molecule histgram
+        steps_list_to_print = steps_list
+    else:
+        step_min = steps_list.start if steps_list.start is not None else 0
+        stride = steps_list.step if steps_list.step is not None else 1
+        steps_list_to_print = []
     
-    for i, ts in enumerate(u.trajectory[stepsList]):
+    # create an MDA Universe for the trajectory
+    u = MDAnalysis.Universe(traj_file_path)
+    # initialize list of Frames and H identification DFs
+    frames_list = []
+    h_identification_DFs_list = []
+    
+    # loop over trajectory, keeping only the steps in steps_list
+    for i, ts in enumerate(tqdm(u.trajectory[steps_list], desc="Analyzing frames")):
+        # create and analyze Frame object from positions and types arrays
+        # kwargs typically include cutoffs
         currentFrame = Frame(positions=u.atoms.positions, labels=u.atoms.types, **kwargs)
         currentFrame.analyze()
+        frames_list.append(currentFrame)
         if do_hydrogen_analysis:
+            # build H identification DF
             h_id = currentFrame.build_hydrogen_identification_array()
             h_identification_DFs_list.append(pd.DataFrame(h_id))
-        frames_list.append(currentFrame)
-
-    if save:
-        #with open(f'{os.path.basename(traj_file_path)}_frame_objects.pkl', 'wb') as f:
-         #   pickle.dump(frames_list, f)
-         # Apparently having to pickle that makes the program crash.
-        if do_hydrogen_analysis:
-            with open(f'{os.path.basename(traj_file_path)}_h_ids_dfs.pkl', 'wb') as f:
-                pickle.dump(h_identification_DFs_list, f)
+    
     if do_molecular_analysis:
-        timeHistoDF = molecular_analysis(frames_list)
-        timeHistoDF.to_csv(f'{os.path.basename(traj_file_path)}_time_molecule_histogram.csv', sep=' ', index=False) 
-    return h_identification_DFs_list, frames_list
+        # build and save per-step molecular histogram
+        if len(steps_list_to_print)==0:
+            step_max = step_min + (i+1) * stride
+            steps_list_to_print = np.arange(step_min, step_max, stride)
+        timeHistoDF = molecular_analysis(frames_list, steps_list=steps_list_to_print)
+        timeHistoDF.to_csv(f'{os.path.basename(traj_file_path)}_time_molecule_histogram.csv', sep=',', index=False)
+    
+    if save and do_hydrogen_analysis:
+        # save list of H identification DFs
+        with open(f'{os.path.basename(traj_file_path)}_h_ids_dfs.pkl', 'wb') as f:
+            pickle.dump(h_identification_DFs_list, f)
 
-def molecular_analysis(frames_list, stepsList=None):
+    return TrajectoryAnalysisResult(
+        frames=frames_list,
+        hydrogen_dfs=h_identification_DFs_list,
+        time_histogram=timeHistoDF if do_molecular_analysis else None
+    )
+
+def molecular_analysis(frames_list, steps_list=None):
     # if first arg is a path : load pickled frames_list object
     if isinstance(frames_list, str):
         with open(f'{os.path(frames_list)}_frame_objects.pkl', 'rb') as f:
             frames_list = pickle.load(frames_list, f)
-    # initialize stepsList if not given
-    if stepsList is None:
-        stepsList = np.arange(len(frames_list))
+    # if steps_list not given, defaults to 0, 1, ..., len(frames_list)-1
+    if steps_list is None:
+        steps_list = np.arange(len(frames_list))
     histoList = []
     moleculesList = []
-    timeHisto = {'Step' : stepsList}
+    timeHisto = {'Step' : steps_list}
     for currentFrame in frames_list:
         currentHisto = currentFrame.molecule_histogram()
         histoList.append(currentHisto)
