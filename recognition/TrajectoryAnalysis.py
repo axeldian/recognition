@@ -158,16 +158,24 @@ def free_energy_proton_hopping(h_id_list, mol1, mol2, mol3, mol4, T = 3000,
     """
     # nested list of RC values
     RC_list = []
+    n_degenerate = 0
     for h_id in h_id_list:
+        # Rows whose 2nd neighbour is the 1st neighbour come from h_id tables built before the
+        # second-neighbour fix; they silently drop configurations with 1.3 < d(O-H) < d(C-H) <= 1.5.
+        n_degenerate += int((np.asarray(h_id['atom1_index']) == np.asarray(h_id['atom2_index'])).sum())
         RC_list.append((h_id['d1'] - h_id['d2'])[(h_id['mol1']==mol2) & (h_id['mol2']==mol1)].to_numpy())
         RC_list.append((h_id['d2'] - h_id['d1'])[(h_id['mol1']==mol3) & (h_id['mol2']==mol4)].to_numpy())
+    if n_degenerate:
+        print(f'WARNING: {n_degenerate} H rows have atom1_index == atom2_index. These h_id tables were built '
+              'with the old second-neighbour search; re-run trajectory_analysis to avoid a bias near RC = 0.')
 
     # Histogram of the flattened collection of all RC values.
     counts, bins = np.histogram([rc for ds in RC_list for rc in ds ], bins=num_bins, range=bins_range)
-    
+
     kT = 8.314463*T/1000  # kT in kJ/mol
     bin_centers = (bins[1:] + bins[:-1])/2
-    free_energy = -kT*np.log(counts)
+    with np.errstate(divide='ignore'):
+        free_energy = np.where(counts > 0, -kT*np.log(np.maximum(counts, 1)), np.nan)  # empty bins -> NaN, not +inf
     if plot:
         plt.plot(bin_centers, free_energy, label=label)       
         plt.grid()

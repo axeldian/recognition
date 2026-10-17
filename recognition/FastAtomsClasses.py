@@ -93,8 +93,9 @@ class Frame():
     def __init__(self, filename=None, box_size=None, types_list = None, N_atom=0, 
                  labels=None, positions=None, hydrogenList=None, 
                  heavyList=None, allAtomsList=None, N_H=0, N_Heavy=0, heavyTrees = None, 
-                 H_cutoffs={'C':1.5, 'O':1.3, 'H':1.2}, 
-                 heavy_cutoffs={'C': {'C' : 1.95, 'O' : 1.82}, 'O': {'C':1.82, 'O':1.52 }}):
+                 H_cutoffs={'C':1.5, 'O':1.3, 'H':1.2},
+                 heavy_cutoffs={'C': {'C' : 1.95, 'O' : 1.82}, 'O': {'C':1.82, 'O':1.52 }},
+                 first_neighbor_rule='cutoff'):
         if filename is None:
             self.filename = None
         else:
@@ -136,6 +137,12 @@ class Frame():
         self.N_Heavy = N_Heavy
         self.H_cutoffs = H_cutoffs
         self.heavy_cutoffs = heavy_cutoffs
+        # 'cutoff'  : H bonded to the closest heavy atom *within its type-specific cutoff* (historical behaviour).
+        # 'nearest' : after H2 detection, every non-H2 H is bonded to its nearest heavy atom;
+        #             cutoffs are only used to find H2 candidates (same rule as the reference C code).
+        if first_neighbor_rule not in ('cutoff', 'nearest'):
+            raise ValueError("first_neighbor_rule must be 'cutoff' or 'nearest'")
+        self.first_neighbor_rule = first_neighbor_rule
         self.analyzed = False
 
     def __len__(self):
@@ -333,12 +340,16 @@ class Frame():
            We must analyze a statistical ensemble of frames and determine the maximum distance
            of a second neighbor (actually this might be overkill for very little perf gain)
         """
+        H_in_H2 = set(np.asarray(H_in_H2_indexes, dtype=int).tolist())
         lonely_hydrogen_pos, lonely_hydrogen_indexes = [] , []
         for H in self.hydrogenList:
-            if not H.isCoordinated:
+            # 'nearest' rule: every H that is not in H2 is (re)attached to its nearest heavy atom,
+            # whatever the type-specific cutoffs said (reference C code behaviour).
+            reattach = self.first_neighbor_rule == 'nearest' and H.index not in H_in_H2
+            if not H.isCoordinated or reattach:
                 lonely_hydrogen_indexes.append(H.index)
                 lonely_hydrogen_pos.append(H.position)
-        
+
         lonely_hydrogen_pos = np.array(lonely_hydrogen_pos)
         lonely_hydrogen_indexes = np.array(lonely_hydrogen_indexes)
         hydrogen_pos = np.asarray([H.position for H in self.hydrogenList])
@@ -358,19 +369,22 @@ class Frame():
                 H = self.allAtomsList[lonely_hydrogen_indexes[i]]
                 H.attribute_first_neighbor(neighbor_1.type_, neighbor_1.index, lonely_distances_to_neighbors[i][0], correct_vector(neighbor_1.position - H.position, self.box_size))
 
-        if len(H_in_H2_indexes) > 0:
-            heavy_indices[H_in_H2_indexes] = True
-            heavy_pos = self.positions[heavy_indices]
-            heavy_indexes = np.nonzero(heavy_indices)[0]
-            heavy_tree = cKDTree(heavy_pos, boxsize=self.box_size)
-
-        h_distances_to_neighbors, h_neighbors_indexes = heavy_tree.query(hydrogen_pos, k=[2])
+        # Second neighbour = closest HEAVY atom that is not the first neighbour.
+        # (Previously: the 2nd-closest point of a tree that also contained H2 hydrogens. That
+        #  returned the first neighbour itself whenever the first neighbour was not the closest
+        #  heavy atom -- e.g. 1.3 < d(O-H) < d(C-H) <= 1.5 with cutoffs C:1.5/O:1.3 -- and an H2
+        #  hydrogen whenever one was closer than the true second heavy neighbour.)
+        n_cand = min(3, len(heavy_indexes))
+        h_distances_to_neighbors, h_neighbors_indexes = heavy_tree.query(hydrogen_pos, k=list(range(1, n_cand + 1)))
         h_neighbors_indexes = heavy_indexes[h_neighbors_indexes.astype(int)]
-        
-        for i, neighbor_index in enumerate(h_neighbors_indexes):
-            second_neighbor = self.allAtomsList[neighbor_index[0]]
+
+        for i, candidates in enumerate(h_neighbors_indexes):
             H = self.hydrogenList[i]
-            H.attribute_second_neighbor(second_neighbor.type_, second_neighbor.index, h_distances_to_neighbors[i][0], correct_vector(second_neighbor.position - H.position, self.box_size))
+            for j, cand in enumerate(candidates):
+                if cand != H.neighAtomIndx[0]:
+                    second_neighbor = self.allAtomsList[cand]
+                    H.attribute_second_neighbor(second_neighbor.type_, second_neighbor.index, h_distances_to_neighbors[i][j], correct_vector(second_neighbor.position - H.position, self.box_size))
+                    break
 
     def coordinate_heavies_to_hydrogens(self):
         """ 
