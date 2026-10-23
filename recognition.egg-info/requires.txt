@@ -1,3 +1,9 @@
-MDAnalysis
+numpy<2.0.0
+MDAnalysis==2.4.3
+gsd==3.2.1
 pandas
-numpy
+scipy
+rdkit
+networkx
+matplotlib
+numba<0.60.0

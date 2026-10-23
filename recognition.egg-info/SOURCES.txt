@@ -1,3 +1,5 @@
+LICENSE
+README.md
 setup.py
 recognition/FastAtomsClasses.py
 recognition/TrajectoryAnalysis.py
